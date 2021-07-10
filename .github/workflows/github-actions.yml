@@ -16,7 +16,9 @@ jobs:
           - name: Run unit test
             run: ./unit-test.sh
     full-test:
-        container: cuaesd/aesd-autotest:assignment6-yocto
+        container:
+          image: cuaesd/aesd-autotest:assignment6-yocto
+          options: --user 1001
         runs-on: self-hosted
         timeout-minutes: 120
         steps:
