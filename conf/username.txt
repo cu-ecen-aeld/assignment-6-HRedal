@@ -1,1 +1,5 @@
+<<<<<<< HEAD
 HRedal
+=======
+aesd-example
+>>>>>>> 4e24c5f (Add automated test support)

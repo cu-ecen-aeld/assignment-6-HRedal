@@ -16,7 +16,11 @@ test:
     stage: test
     script:
         - cd ${CI_PROJECT_DIR}
+<<<<<<< HEAD
         - ./assignment-autotest/docker/docker-run-test.sh
+=======
+        - ./assignment-autotest/docker/docker-run-test.sh -n
+>>>>>>> 4e24c5f (Add automated test support)
 
     artifacts:
         paths:
