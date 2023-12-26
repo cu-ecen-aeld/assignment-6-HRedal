@@ -1,5 +1,2 @@
-<<<<<<< HEAD
-assignment5
-=======
 assignment6-yocto
->>>>>>> 4e24c5f (Add automated test support)
+
