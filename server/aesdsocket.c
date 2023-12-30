@@ -21,6 +21,12 @@
 #include <signal.h>
 #include <pthread.h>
 
+#include "queue.h"
+
+#define _GNU_SOURCE
+#include <unistd.h>
+#include <sys/types.h>
+
 /*
 int getaddrinfo(const char *node,     // e.g. "www.example.com" or IP
                 const char *service,  // e.g. "http" or port number
@@ -41,6 +47,73 @@ int   my_socket   = 0;                     // Global variable to store the file 
                                            // to the socket for receiving data
 FILE* filePointer = NULL;                  // File pointer to the file to store temporally
                                            // data received
+                                                                                     
+struct slist_threadData_s {
+  pthread_t            theThreadId;        // Thread Id of the thread.
+  bool                 threadCompleted;    // Thread execution has been completed
+  bool                 threadDeleted;      // The cread has been deleted (called thread_join)
+  
+  struct sockaddr_in   their_addr;
+  int                  new_socket;
+  
+  SLIST_ENTRY(slist_threadData_s) elementList;
+};
+   
+SLIST_HEAD(slisthead, slist_threadData_s) listHead;
+                                           
+pthread_mutex_t exclusiveAccessWriteFile;  // Mutex for exclusive access to write file 
+
+/**
+ * Function:         cleanUpFunction
+ * Description:      Function in charge of cleaning any dandling data that may be in used by the server 
+ * Parameter:        -
+ * Pre:              -
+ * Post:             The exclusiveAccessWriteFile mutex is deleted.
+ *                   The socket (my_socket) is closed).
+ *                   The file to write the results is closed.
+ * Return:           void
+ */
+void cleanUpFunction() {
+  syslog(LOG_DEBUG, "Closing socket.");
+  shutdown(my_socket, SHUT_RDWR);
+  close(my_socket);
+
+  syslog(LOG_DEBUG, "Destroying the mutex.");
+  pthread_mutex_destroy(&exclusiveAccessWriteFile);
+  
+  syslog(LOG_DEBUG, "Deleting file %s.", FILE_TO_READWRITE);
+  fclose(filePointer);
+  remove(fileToWrite);
+}
+
+struct t_eventData{
+    int myData;
+};
+
+void expired(union sigval timer_data){
+  struct t_eventData *data = timer_data.sival_ptr;
+    
+  time_t rawtime;
+  struct tm *info;
+  char   buffer[80];
+
+  printf("Formatted date & time : |%s|\n", buffer );  
+    
+  if (filePointer != NULL) {
+    pthread_mutex_lock(&exclusiveAccessWriteFile);
+
+    time( &rawtime );
+    info = localtime( &rawtime );
+    strftime(buffer,80,"%x - %I:%M%p", info);
+
+    syslog(LOG_USER, "Storing timestamp in file: %s\n", buffer);
+    fseek(filePointer, 0, SEEK_END);	
+    fprintf(filePointer, "timestamp:f%s", buffer);
+    pthread_mutex_unlock(&exclusiveAccessWriteFile);
+  }
+ 
+  syslog(LOG_DEBUG, "Timer fired %d times\n", ++data->myData);
+}
 
 /**
  * Function:         signal_handler
@@ -57,7 +130,7 @@ static void signal_handler(int signal_number) {
   sigset_t currentMask;
   sigprocmask(SIG_SETMASK, NULL, &previousMask);
   
-  syslog(LOG_INFO, "Caught signal, exiting");
+  syslog(LOG_INFO, "Caught signal, exiting.");
   
   sigfillset(&currentMask);
   sigprocmask(SIG_SETMASK, &currentMask, NULL);
@@ -68,12 +141,14 @@ static void signal_handler(int signal_number) {
     caught_sigterm = true;
   }
   
-  syslog(LOG_DEBUG, "Closing socket");
+  syslog(LOG_DEBUG, "Closing socket.");
   close(my_socket);
 
-  syslog(LOG_DEBUG, "Deleting file %s", FILE_TO_READWRITE);
+  syslog(LOG_DEBUG, "Deleting file %s.", FILE_TO_READWRITE);
   fclose(filePointer);
   remove(fileToWrite);
+  
+  cleanUpFunction();
   
   sigprocmask(SIG_SETMASK, &previousMask, NULL);
 }
@@ -212,6 +287,73 @@ char* readDataFromSocket(int sock_fd){
     return buffer;
 }
 
+
+/**
+ * Function:         handleConnection
+ * Description:      Function that creates one thread per connection to receive incoming packets.
+ * Parameter:        their_addr -> Addres of the client.
+ *                   new_socket -> New socket with the connection.
+ * Pre:              -
+ * Post:             Data has been read from the socket or NULL if no data is read.
+ * Return:           -
+ */
+void* handleConnection(void* connectionDetails) {
+                     
+  struct sockaddr_in   their_addr;
+  int                  new_socket;
+  char*                receivedMessage = NULL;
+  int                  stringLength    = 0;
+  int                  numbytesSent    = 0;
+  int                  indexInitBuffer = 0;
+    
+  their_addr = ((struct slist_threadData_s*) connectionDetails)->their_addr;
+  new_socket = ((struct slist_threadData_s*) connectionDetails)->new_socket;
+
+  char *ipv4Address_str = inet_ntoa(((struct sockaddr_in*) &their_addr)->sin_addr);
+  syslog(LOG_INFO, "Accepted connection from %s\n", ipv4Address_str);
+    
+  receivedMessage = readDataFromSocket(new_socket);
+  if (receivedMessage == NULL) {
+    return NULL;
+  }
+  if (receivedMessage != NULL) {
+    syslog(LOG_DEBUG, "Received number of bytes = %ld", strlen(receivedMessage));
+
+    if (filePointer != NULL) {
+      pthread_mutex_lock(&exclusiveAccessWriteFile);
+      syslog(LOG_USER, "Storing contents in file: %s\n", receivedMessage);
+      fseek(filePointer, 0, SEEK_END);	
+      fprintf(filePointer, "%s", receivedMessage);
+      pthread_mutex_unlock(&exclusiveAccessWriteFile);
+    }
+
+    fseek(filePointer, 0, SEEK_SET);
+    while (true) {
+      if (!fgets(receivedMessage, sizeof(receivedMessage), filePointer))
+        break;
+            
+      stringLength    = strlen(receivedMessage);
+
+      numbytesSent    = 0;
+      indexInitBuffer = 0;
+      numbytesSent = send(new_socket, &receivedMessage[indexInitBuffer], stringLength, 0);
+      
+      while ((stringLength != -1) && (stringLength != numbytesSent)) {
+        stringLength    -= numbytesSent;
+        indexInitBuffer += numbytesSent;
+        numbytesSent = send(new_socket, &receivedMessage[indexInitBuffer], stringLength, 0);
+      }
+    }
+    free(receivedMessage);
+  }
+
+  syslog(LOG_INFO, "Closed connection from %s\n", ipv4Address_str);
+  close(new_socket);
+  
+  return NULL;
+
+}
+
 /**
  * Function:         receiveMessages
  * Description:      Function in charge of receiving data and sending it back to the client.
@@ -223,14 +365,13 @@ char* readDataFromSocket(int sock_fd){
  *                   if an error is found.
  */
 int receiveMessages(int SocketFileDescriptor) {
-  int        		status          = 0;
-  int 			new_socket      = 0;
-  char*                receivedMessage = NULL;
+  int                  status          = 0;
+
   socklen_t            addr_size;
-  struct sockaddr_in   their_addr;
-  int                  stringLength    = 0;
-  int                  numbytesSent    = 0;
-  int                  indexInitBuffer = 0;
+  
+  struct slist_threadData_s*
+                       connectionDetailsP;
+  pthread_t            theThread;
   
   if (SocketFileDescriptor == -1) {
     syslog(LOG_ERR, "Invalid socket file descriptor");
@@ -251,11 +392,13 @@ int receiveMessages(int SocketFileDescriptor) {
   }
   
   while (true) {
-    printf("Accepting new connection:");
-    addr_size = sizeof(their_addr);
-    new_socket = accept(my_socket, (struct sockaddr*)&their_addr, &addr_size);
+    connectionDetailsP = malloc(sizeof(struct slist_threadData_s));
+  
+    syslog(LOG_DEBUG, "Accepting new connection.");
+    addr_size = sizeof(connectionDetailsP->their_addr);
+    connectionDetailsP->new_socket = accept(my_socket, (struct sockaddr*) &connectionDetailsP->their_addr, &addr_size);
 
-    if (new_socket == -1) {
+    if (connectionDetailsP->new_socket == -1) {
       if (!caught_sigint && !caught_sigterm) {
         syslog(LOG_ERR, "socket accept error: %s\n", gai_strerror(errno));
         usleep(1000);
@@ -266,41 +409,29 @@ int receiveMessages(int SocketFileDescriptor) {
       }
     }
     
-    char *ipv4Address_str = inet_ntoa(((struct sockaddr_in*) &their_addr)->sin_addr);
-    syslog(LOG_INFO, "Accepted connection from %s\n", ipv4Address_str);
+    // Calling handleConnection to create one thread per connection
+    pthread_create(&theThread, NULL, handleConnection, connectionDetailsP);
+
+    connectionDetailsP->theThreadId     = theThread;
+    connectionDetailsP->threadCompleted = false;
+    connectionDetailsP->threadDeleted   = false;
+       
+    // Inserting the thread in the list of threads.
+    syslog(LOG_DEBUG, "The thread Id (%lu) has been created.\n", connectionDetailsP->theThreadId);
+    SLIST_INSERT_HEAD(&listHead, connectionDetailsP, elementList);
     
-    receivedMessage = readDataFromSocket(new_socket);
-    if (receivedMessage != NULL) {
-      syslog(LOG_DEBUG, "Received number of bytes = %ld", strlen(receivedMessage));
-
-      if (filePointer != NULL) {
-        syslog(LOG_USER, "Storing contents in file: %s\n", receivedMessage);
-        fseek(filePointer, 0, SEEK_END);	
-        fprintf(filePointer, "%s", receivedMessage);
-      }
-
-      fseek(filePointer, 0, SEEK_SET);
-      while (true) {
-        if (!fgets(receivedMessage, sizeof(receivedMessage), filePointer))
-          break;
-            
-        stringLength    = strlen(receivedMessage);
-
-        numbytesSent    = 0;
-        indexInitBuffer = 0;
-        numbytesSent = send(new_socket, &receivedMessage[indexInitBuffer], stringLength, 0);
+    //  Checking if any thread has been terminated / completed
+        // Read1.
+    SLIST_FOREACH(connectionDetailsP, &listHead, elementList) {
+      if ((connectionDetailsP->threadCompleted) && 
+          (!connectionDetailsP->threadDeleted)) {
+        syslog(LOG_DEBUG, "The thread Id (%lu) has completed its execution)", connectionDetailsP->theThreadId);
+        pthread_join(connectionDetailsP->theThreadId, NULL);
       
-        while ((stringLength != -1) && (stringLength != numbytesSent)) {
-	  stringLength    -= numbytesSent;
-	  indexInitBuffer += numbytesSent;
-	  numbytesSent = send(new_socket, &receivedMessage[indexInitBuffer], stringLength, 0);
-        }
+        // Marking thread as deleted.
+        connectionDetailsP->threadDeleted = true;
       }
-      free(receivedMessage);
     }
-
-    syslog(LOG_INFO, "Closed connection from %s\n", ipv4Address_str);
-    close(new_socket);
   }
 
   fclose(filePointer);
@@ -312,13 +443,30 @@ int receiveMessages(int SocketFileDescriptor) {
 
 int main(int argc, char *argv[]) {
    int                         returnCode   = 0;
+   int                         returnValue  = 0;
    bool                        runAsDaemon  = false;
    pid_t                       theChildPid  = 0;
    pid_t                       theSid       = 0;
    
+   // Variables used to create a timer to be raised every 10 seconds.
+   struct t_eventData         eventData = { .myData = 0 };
+   struct sigevent            sev = { 0 };                               // sigevent specifies behaviour on expiration
+   struct itimerspec          its = {.it_value.tv_sec     = 10,          // specify start delay and interval
+                                     .it_value.tv_nsec    = 0,
+                                     .it_interval.tv_sec  = 10,          // it_value and it_interval must not be zero
+                                     .it_interval.tv_nsec = 0
+                                    };
+   timer_t                    timerId                     = 0;
    
    openlog(argv[0], LOG_PID|LOG_CONS, LOG_LOCAL0);
    syslog(LOG_USER, "Syslog has been setup for aesdsocket.log\n");
+
+   SLIST_INIT(&listHead);
+   
+   if (pthread_mutex_init(&exclusiveAccessWriteFile, NULL) != 0) { 
+     syslog(LOG_USER, "Mutex init for file write access has failed\n"); 
+     exit(EXIT_FAILURE);
+   } 
    
    my_socket = create_socket(PORT);
    if (my_socket == -1) {
@@ -369,12 +517,36 @@ int main(int argc, char *argv[]) {
       }
    }
    
-   int returnValue = receiveMessages(my_socket);
+   // Creating the timer to be raised every 10 seconds
+   sev.sigev_notify          = SIGEV_THREAD;
+   sev.sigev_notify_function = &expired;
+   sev.sigev_value.sival_ptr = &eventData;
+   
+       /* create timer */
+   returnValue = timer_create(CLOCK_REALTIME, &sev, &timerId);
+   if (returnValue != 0){
+     syslog(LOG_ERR, "Error when creating the timer (calling timer_create function): %s\n", strerror(errno));
+     cleanUpFunction();
+     exit(EXIT_FAILURE);
+   }
+
+   /* start timer */
+   returnValue = timer_settime(timerId, 0, &its, NULL);
+   if (returnValue != 0){
+     syslog(LOG_ERR, "Error timer_settime: %s\n", strerror(errno));
+     cleanUpFunction();
+     exit(EXIT_FAILURE);
+   }
+   syslog(LOG_DEBUG, "Timer to be raised every 10 seconds has been created");
+   
+   returnValue = receiveMessages(my_socket);
    if (returnValue != 0) {
      syslog(LOG_ERR, "Failure when reading message in the socket");
      remove(FILE_TO_READWRITE);
      exit(EXIT_FAILURE);
    }
+   
+   pthread_mutex_destroy(&exclusiveAccessWriteFile);
    
    return returnCode;
 }
