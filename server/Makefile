@@ -8,7 +8,7 @@ else
 endif
 
 
-CFLAGS=-I. -g -Wall
+CFLAGS=-I. -g -Wall -pthread  -lpthread -lrt
 
 ODIR=obj
 

@@ -22,6 +22,7 @@
 #include <pthread.h>
 
 #include "queue.h"
+#include "time.h"
 
 #define _GNU_SOURCE
 #include <unistd.h>
