@@ -1,31 +1,30 @@
-# CROSS_COMPILE = aarch64-none-linux-gnu-
 CC?=${CROSS_COMPILE}gcc
 
-# ifdef CROSS_COMPILE
-#   CC:=$(CROSS_COMPILE)gcc
-# else
-#   CC:=gcc
-# endif
+CFLAGS ?=-I. -g -Wall
+LDFLAGS ?= -lrt -lpthread -pthread
+ODIR ?=obj
+DEBUG_OPTS ?= -o $(TARGET) -ggdb
+TARGET ?=aesdsocket
 
-
-CFLAGS=-I. -g -Wall
-LDFLAGS?= -lrt -lpthread -pthread
-ODIR=obj
-DEBUG_OPTS = -o0 -ggdb
-
-OBJ = aesdsocket.o
+OBJ ?= aesdsocket.o
 
 %.o: %.c
 	$(CC) -c -o $@ $< $(CFLAGS) $(LDFLAGS)
 
 aesdsocket : $(OBJ)
-	$(CC) -o $@ $^ $(CFLAGS) $(LIBS) $(LDFLAGS) $(DEBUG_OPTS)
+	$(CC) -o $(TARGET) $^ $(CFLAGS) $(LIBS) $(LDFLAGS)
 	
 clean:
-	rm -f ./*.o *~
+	rm -f ./*.o *~ ./$(TARGET)
 
-aesdsocketd: $(OBJ)
-	$(CC) -o $@ $^ $(CFLAGS) $(LIBS) $(LDFLAGS)
+debug: $(OBJ)
+	$(CC) -o $(TARGET) $^ $(CFLAGS) $(LIBS) $(LDFLAGS) $(DEBUG_OPTS)
 	
 all: clean aesdsocket
 default: aesdsocket 
+
+run: kill clean debug
+	./$(TARGET)
+
+kill:
+	-killall aesdsocket
