@@ -95,21 +95,19 @@ void expired(union sigval timer_data){
   struct t_eventData *data = timer_data.sival_ptr;
     
   time_t rawtime;
-  struct tm *info;
+  struct tm *local_time;
   char   buffer[80];
 
-  printf("Formatted date & time : |%s|\n", buffer );  
-    
   if (filePointer != NULL) {
     pthread_mutex_lock(&exclusiveAccessWriteFile);
 
     time( &rawtime );
-    info = localtime( &rawtime );
-    strftime(buffer,80,"%x - %I:%M%p", info);
+    local_time = localtime( &rawtime );
+    strftime(buffer, sizeof(buffer),"%F %T:%M%p", local_time);
 
     syslog(LOG_USER, "Storing timestamp in file: %s\n", buffer);
     fseek(filePointer, 0, SEEK_END);	
-    fprintf(filePointer, "timestamp:f%s", buffer);
+    fprintf(filePointer, "timestamp: %s\n", buffer);
     pthread_mutex_unlock(&exclusiveAccessWriteFile);
   }
  
